@@ -72,9 +72,9 @@ login_user() {
     record "Authentication" "$tag login" PASS "Login POST returned HTTP $code"
     if [[ "$tag" == "admin" ]]; then
       if [[ -n "$old_session" && -n "$new_session" && "$old_session" != "$new_session" ]]; then
-        record "Authentication and sessions" "session ID regenerated at login" PASS "PHPSESSID changed after successful authentication"
+        record "Authentication and sessions" "session ID regenerated at login" PASS "BLUDIT-KEY changed after successful authentication"
       else
-        record "Authentication and sessions" "session ID regenerated at login" FINDING "PHPSESSID did not visibly change across login"
+        record "Authentication and sessions" "session ID regenerated at login" FINDING "BLUDIT-KEY did not visibly change across login"
       fi
     fi
     return 0
