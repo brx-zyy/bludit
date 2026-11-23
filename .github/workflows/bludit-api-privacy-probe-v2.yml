@@ -1,0 +1,96 @@
+name: Bludit API privacy probe v2
+on:
+  push:
+    branches:
+      - security-audit/bludit-live-test
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  api-privacy-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: gd, mbstring, xml, zip, fileinfo
+          coverage: none
+      - name: Install disposable demo and verify API privacy boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/router.php <<'PHP'
+          <?php
+          $root = getenv('BLUDIT_ROOT');
+          $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+          if ($path !== '/' && is_file($root . $path)) return false;
+          $_SERVER['DOCUMENT_ROOT'] = $root;
+          $_SERVER['SCRIPT_NAME'] = '/index.php';
+          $_SERVER['PHP_SELF'] = '/index.php';
+          require $root . '/index.php';
+          PHP
+          export BLUDIT_ROOT="$GITHUB_WORKSPACE"
+          php -S 127.0.0.1:8080 -t "$GITHUB_WORKSPACE" /tmp/router.php >/tmp/server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sS http://127.0.0.1:8080/install.php >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS 'http://127.0.0.1:8080/install.php?demo=true' >/dev/null
+          test -f bl-content/databases/site.php
+          jar=/tmp/admin.cookies
+          curl -sS -D /tmp/login-get.headers -c "$jar" -b "$jar" -L 'http://127.0.0.1:8080/admin/login' -o /tmp/login.html
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/login.html', encoding='utf-8', errors='ignore').read()
+          m=re.search('name="tokenCSRF"[^>]*value="([^"]+)', s)
+          if not m: m=re.search('value="([^"]+)"[^>]*name="tokenCSRF"', s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$csrf" || { echo 'CSRF token missing'; cat /tmp/login-get.headers; sed -n '1,80p' /tmp/login.html; exit 1; }
+          code="$(curl -sS -o /tmp/login-post.html -w '%{http_code}' -D /tmp/login-post.headers -c "$jar" -b "$jar" -L --post301 --post302 -X POST --data-urlencode 'username=admin' --data-urlencode 'password=demo123' --data-urlencode "tokenCSRF=$csrf" 'http://127.0.0.1:8080/admin/login')"
+          echo "Login final HTTP: $code"
+          cat /tmp/login-post.headers
+          api="$(curl -sS -L -b "$jar" 'http://127.0.0.1:8080/admin/api')"
+          echo "$api" | jq .
+          token="$(echo "$api" | jq -r '.apiToken // empty')"
+          auth="$(echo "$api" | jq -r '.authToken // empty')"
+          test -n "$token" && test -n "$auth" || { echo 'Admin API credentials missing'; exit 1; }
+          marker='AUDIT_PRIVATE_DRAFT_8b91e2'
+          body="$(jq -n --arg title "$marker" --arg content 'synthetic private draft for API privacy test' '{title:$title,content:$content,type:"draft",tags:"audit-private-tag"}')"
+          create_code="$(curl -sS -o /tmp/create.json -w '%{http_code}' -X POST -H "Authorization: Bearer $token" -H "X-Auth-Token: $auth" -H 'Content-Type: application/json' -d "$body" 'http://127.0.0.1:8080/api/pages')"
+          echo "Draft creation HTTP: $create_code"
+          cat /tmp/create.json
+          key="$(jq -r '.data.key // empty' /tmp/create.json)"
+          if [ -z "$key" ]; then key="$(jq -r '.data.slug // empty' /tmp/create.json)"; fi
+          if [ -z "$key" ]; then echo 'Could not resolve created draft key; aborting privacy assertion'; exit 1; fi
+          list_code="$(curl -sS -o /tmp/read-only-list.json -w '%{http_code}' -H "Authorization: Bearer $token" "http://127.0.0.1:8080/api/pages?published=false&draft=true")"
+          echo "Read-only draft listing HTTP: $list_code"
+          if jq -e --arg marker "$marker" '.data[]? | select(.title == $marker)' /tmp/read-only-list.json >/dev/null; then
+            echo 'FINDING: read-only API token returned private draft in listing'
+          else
+            echo 'NO DISCLOSURE: listing did not contain marker'
+          fi
+          direct_code="$(curl -sS -o /tmp/read-only-direct.json -w '%{http_code}' -H "Authorization: Bearer $token" "http://127.0.0.1:8080/api/pages/$key")"
+          echo "Read-only direct page HTTP: $direct_code"
+          if jq -e --arg marker "$marker" '.data.title == $marker' /tmp/read-only-direct.json >/dev/null; then
+            echo 'FINDING: read-only API token returned private draft by direct key'
+          else
+            echo 'NO DISCLOSURE: direct lookup did not contain marker'
+          fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bludit-api-privacy-probe-v2
+          path: |
+            /tmp/server.log
+            /tmp/login-get.headers
+            /tmp/login-post.headers
+            /tmp/login.html
+            /tmp/create.json
+            /tmp/read-only-list.json
+            /tmp/read-only-direct.json
+          if-no-files-found: warn
