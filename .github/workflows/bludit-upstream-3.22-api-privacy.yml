@@ -53,6 +53,7 @@ jobs:
         working-directory: bludit
         run: |
           set -euo pipefail
+          BASE=http://127.0.0.1:8080
           jar=/tmp/upstream-admin.cookies
           curl -sS -c "$jar" -b "$jar" "$BASE/admin/login" -o /tmp/upstream-login.html
           csrf="$(python3 - <<'PY'
