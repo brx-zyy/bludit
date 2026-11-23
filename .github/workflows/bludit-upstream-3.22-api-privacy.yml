@@ -59,7 +59,7 @@ jobs:
           csrf="$(python3 - <<'PY'
           import re
           s=open('/tmp/upstream-login.html', encoding='utf-8', errors='ignore').read()
-          m=re.search(r"var\s+tokenCSRF\s*=\s*['\"]([^'\"]+)['\"]", s)
+          m=re.search(r'var\s+tokenCSRF\s*=\s*"([^"]+)"', s)
           print(m.group(1) if m else '')
           PY
           )"
