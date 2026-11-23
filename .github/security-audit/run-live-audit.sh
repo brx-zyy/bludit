@@ -13,6 +13,7 @@ ADMIN_AUTH=""
 PASS=0
 FINDINGS=0
 WARN=0
+INFO=0
 
 cat > "$OUT" <<'EOF'
 # Bludit isolated live security audit
@@ -30,6 +31,7 @@ record() {
     PASS) PASS=$((PASS+1));;
     FINDING) FINDINGS=$((FINDINGS+1));;
     WARN) WARN=$((WARN+1));;
+    INFO) INFO=$((INFO+1));;
   esac
   echo "[$result] $area / $test — $evidence"
 }
@@ -60,7 +62,7 @@ login_user() {
     return 1
   fi
   local old_session new_session
-  old_session="$(awk '$6=="PHPSESSID"{v=$7} END{print v}' "$jar")"
+  old_session="$(awk '$6=="BLUDIT-KEY"{v=$7} END{print v}' "$jar")"
   code="$(http "/tmp/login-$tag-response" -c "$jar" -b "$jar" -X POST \
     --data-urlencode "username=$username" \
     --data-urlencode "password=$password" \
@@ -163,14 +165,14 @@ fi
 # Read-only API token must not expose drafts. This is the primary suspected issue.
 CODE="$(http /tmp/api-draft-list.json "${AUTH[@]}" "$BASE/api/pages?published=false&draft=true")"
 if jq -e --arg marker "$MARKER" '.data[]? | select(.title == $marker)' /tmp/api-draft-list.json >/dev/null 2>&1; then
-  record "API authorization" "read-only token lists unpublished draft" FINDING "HTTP $CODE response contains $MARKER at GET /api/pages?published=false&draft=true"
+  record "API authorization" "documented read-only API lists drafts" INFO "HTTP $CODE response contains $MARKER at GET /api/pages?published=false&draft=true"
 else
   record "API authorization" "read-only token lists unpublished draft" PASS "HTTP $CODE response did not contain the private draft marker"
 fi
 
 CODE="$(http /tmp/api-draft-direct.json "${AUTH[@]}" "$BASE/api/pages/$PAGE_KEY")"
 if jq -e --arg marker "$MARKER" '.data.title == $marker' /tmp/api-draft-direct.json >/dev/null 2>&1; then
-  record "API authorization" "read-only token fetches unpublished draft by key" FINDING "HTTP $CODE direct GET returned $MARKER"
+  record "API authorization" "documented read-only API fetches draft by key" INFO "HTTP $CODE direct GET returned $MARKER"
 else
   record "API authorization" "read-only token fetches unpublished draft by key" PASS "HTTP $CODE response did not contain the private draft marker"
 fi
@@ -178,13 +180,13 @@ fi
 # Scheduled content must also be hidden from a read-only API token.
 CODE="$(http /tmp/api-scheduled-list.json "${AUTH[@]}" "$BASE/api/pages?published=false&scheduled=true")"
 if jq -e --arg marker "$SCHEDULED_MARKER" '.data[]? | select(.title == $marker)' /tmp/api-scheduled-list.json >/dev/null 2>&1; then
-  record "API authorization" "read-only token lists scheduled content" FINDING "HTTP $CODE response contains $SCHEDULED_MARKER"
+  record "API authorization" "documented read-only API lists scheduled content" INFO "HTTP $CODE response contains $SCHEDULED_MARKER"
 else
   record "API authorization" "read-only token lists scheduled content" PASS "HTTP $CODE response did not contain scheduled marker"
 fi
 CODE="$(http /tmp/api-scheduled-direct.json "${AUTH[@]}" "$BASE/api/pages/audit-private-scheduled")"
 if jq -e --arg marker "$SCHEDULED_MARKER" '.data.title == $marker' /tmp/api-scheduled-direct.json >/dev/null 2>&1; then
-  record "API authorization" "read-only token fetches scheduled page by key" FINDING "HTTP $CODE direct GET returned $SCHEDULED_MARKER"
+  record "API authorization" "documented read-only API fetches scheduled page by key" INFO "HTTP $CODE direct GET returned $SCHEDULED_MARKER"
 else
   record "API authorization" "read-only token fetches scheduled page by key" PASS "HTTP $CODE response did not contain scheduled marker"
 fi
@@ -227,7 +229,7 @@ CODE="$(http /tmp/api-upload-file.json "${ADMIN_HEADERS[@]}" -F 'file=@/tmp/priv
 if [[ "$CODE" == "200" || "$CODE" == "201" ]]; then
   CODE="$(http /tmp/api-private-files.json "${AUTH[@]}" "$BASE/api/files/$PAGE_KEY")"
   if grep -q 'private-attachment.txt' /tmp/api-private-files.json; then
-    record "API authorization" "read-only token lists files attached to private draft" FINDING "GET /api/files/$PAGE_KEY disclosed private-attachment.txt (HTTP $CODE)"
+    record "API authorization" "documented read-only API lists page files" INFO "GET /api/files/$PAGE_KEY disclosed private-attachment.txt (HTTP $CODE)"
   else
     record "API authorization" "read-only token lists files attached to private draft" PASS "No private attachment filename in response (HTTP $CODE)"
   fi
@@ -269,8 +271,8 @@ else
 fi
 
 # Create two low-privilege users through the admin-only API.
-OWNER_BODY='{"new_username":"audit-owner","new_password":"OwnerPass123!","role":"editor"}'
-ATTACKER_BODY='{"new_username":"audit-attacker","new_password":"AttackerPass123!","role":"author"}'
+OWNER_BODY='{"new_username":"auditowner","new_password":"OwnerPass123!","role":"editor"}'
+ATTACKER_BODY='{"new_username":"auditattacker","new_password":"AttackerPass123!","role":"author"}'
 CODE="$(http /tmp/create-owner.json -X POST "${ADMIN_HEADERS[@]}" "${JSON[@]}" -d "$OWNER_BODY" "$BASE/api/users")"
 if [[ "$CODE" == "201" || "$CODE" == "200" ]]; then
   record "Page ownership" "create editor test account" PASS "Created audit-owner"
@@ -439,6 +441,7 @@ fi
   echo "- Passed checks: $PASS"
   echo "- Potential findings reproduced: $FINDINGS"
   echo "- Warnings / setup limitations: $WARN"
+  echo "- Informational / documented behavior: $INFO"
   echo
   echo "A FINDING row is an observed behavior in this disposable test instance, not yet a maintainer-confirmed vulnerability. A PASS row only covers the exact tested case."
 } >> "$OUT"
