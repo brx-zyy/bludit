@@ -248,6 +248,36 @@ if [[ "$CODE" == "302" || "$CODE" == "401" ]]; then
 else
   record "Page ownership" "author cannot open another author's page" FINDING "Cross-owner edit request returned HTTP $CODE"
 fi
+
+# Attempt a cross-owner edit and delete through the actual admin controller.
+curl -sS -b "$ATTACKER_JAR" "$BASE/admin/content" -o /tmp/attacker-content-for-csrf.html
+ATTACKER_CSRF="$(csrf_from /tmp/attacker-content-for-csrf.html)"
+if [[ -n "$ATTACKER_CSRF" ]]; then
+  CODE="$(http /tmp/author-cross-owner-delete.html -b "$ATTACKER_JAR" -c "$ATTACKER_JAR" -X POST \\
+    --data-urlencode "tokenCSRF=$ATTACKER_CSRF" \\
+    --data-urlencode "key=$PAGE_KEY" \\
+    --data-urlencode "type=delete" \\
+    --data-urlencode "tab=draft" "$BASE/admin/edit-content/$PAGE_KEY")"
+  CONTENT_AFTER_DELETE="$(php -r '$s=file_get_contents("bl-content/databases/pages.php"); $i=strpos($s,"?>"); $d=json_decode(substr($s,$i+2),true); echo isset($d["audit-private-draft"]) ? "present" : "missing";')"
+  if [[ "$CONTENT_AFTER_DELETE" == "present" ]]; then
+    record "Page ownership" "author cannot delete another author's page" PASS "Cross-owner delete POST returned HTTP $CODE; draft still exists"
+  else
+    record "Page ownership" "author cannot delete another author's page" FINDING "Cross-owner delete removed the draft (HTTP $CODE)"
+  fi
+
+  OWNER_UUID="$(php -r '$s=file_get_contents("bl-content/databases/pages.php"); $i=strpos($s,"?>"); $d=json_decode(substr($s,$i+2),true); echo $d["audit-private-draft"]["uuid"] ?? "";')"
+  CODE="$(http /tmp/author-cross-owner-list-images.json -b "$ATTACKER_JAR" -c "$ATTACKER_JAR" -X POST \\
+    --data-urlencode "tokenCSRF=$ATTACKER_CSRF" \\
+    --data-urlencode "path=thumbnails" \\
+    --data-urlencode "uuid=$OWNER_UUID" "$BASE/admin/ajax/list-images")"
+  if grep -Eqi 'sufficient permissions|status[^0-9]*1' /tmp/author-cross-owner-list-images.json; then
+    record "Page ownership" "author cannot list another author's images via AJAX" PASS "list-images rejected foreign page UUID (HTTP $CODE)"
+  else
+    record "Page ownership" "author cannot list another author's images via AJAX" FINDING "Foreign page image list was not clearly denied (HTTP $CODE): $(head -c 180 /tmp/author-cross-owner-list-images.json)"
+  fi
+else
+  record "Page ownership" "cross-owner edit/delete/AJAX setup" WARN "Could not extract author CSRF token"
+fi
 CONTENT_DB="$(php -r '$s=file_get_contents("bl-content/databases/pages.php"); $i=strpos($s,"?>"); $d=json_decode(substr($s,$i+2),true); echo isset($d["audit-private-draft"]) ? "present" : "missing";')"
 if [[ "$CONTENT_DB" == "present" ]]; then
   record "Page ownership" "cross-owner request did not delete page" PASS "Draft remains in pages database"
