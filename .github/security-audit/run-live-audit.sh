@@ -59,12 +59,22 @@ login_user() {
     record "Authentication" "$tag login CSRF bootstrap" WARN "Could not extract tokenCSRF from login page"
     return 1
   fi
+  local old_session new_session
+  old_session="$(awk '$6=="PHPSESSID"{v=$7} END{print v}' "$jar")"
   code="$(http "/tmp/login-$tag-response" -c "$jar" -b "$jar" -X POST \
     --data-urlencode "username=$username" \
     --data-urlencode "password=$password" \
     --data-urlencode "tokenCSRF=$csrf" "$BASE/admin/login")"
+  new_session="$(awk '$6=="PHPSESSID"{v=$7} END{print v}' "$jar")"
   if [[ "$code" == "302" || "$code" == "200" ]]; then
     record "Authentication" "$tag login" PASS "Login POST returned HTTP $code"
+    if [[ "$tag" == "admin" ]]; then
+      if [[ -n "$old_session" && -n "$new_session" && "$old_session" != "$new_session" ]]; then
+        record "Authentication and sessions" "session ID regenerated at login" PASS "PHPSESSID changed after successful authentication"
+      else
+        record "Authentication and sessions" "session ID regenerated at login" FINDING "PHPSESSID did not visibly change across login"
+      fi
+    fi
     return 0
   fi
   record "Authentication" "$tag login" WARN "Login POST returned HTTP $code"
@@ -88,6 +98,36 @@ if [[ -z "$API_TOKEN" || -z "$ADMIN_AUTH" ]]; then
   exit 0
 fi
 record "API" "activate API and obtain test credentials" PASS "Admin-only API controller returned synthetic test credentials"
+
+# Remember-me: authenticate with a persistent cookie, then replay only that cookie
+# in a fresh client session and observe whether the server rotates the token.
+REMEMBER_JAR=/tmp/bludit-remember.cookies
+curl -sS -c "$REMEMBER_JAR" -b "$REMEMBER_JAR" "$BASE/admin/login" -o /tmp/remember-login.html
+REMEMBER_CSRF="$(csrf_from /tmp/remember-login.html)"
+if [[ -n "$REMEMBER_CSRF" ]]; then
+  CODE="$(http /tmp/remember-login-response -c "$REMEMBER_JAR" -b "$REMEMBER_JAR" -X POST \
+    --data-urlencode 'username=admin' \
+    --data-urlencode 'password=demo123' \
+    --data-urlencode 'remember=true' \
+    --data-urlencode "tokenCSRF=$REMEMBER_CSRF" "$BASE/admin/login")"
+  TOKEN_BEFORE="$(awk '$6=="BLUDITREMEMBERTOKEN"{v=$7} END{print v}' "$REMEMBER_JAR")"
+  if [[ -n "$TOKEN_BEFORE" ]]; then
+    awk 'BEGIN{FS="\\t"} /^#/ {print; next} $6=="BLUDITREMEMBERUSERNAME" || $6=="BLUDITREMEMBERTOKEN" {print}' "$REMEMBER_JAR" >/tmp/bludit-remember-only.cookies
+    CODE="$(http /tmp/remember-replay.html -c /tmp/bludit-remember-only.cookies -b /tmp/bludit-remember-only.cookies "$BASE/admin/login")"
+    TOKEN_AFTER="$(awk '$6=="BLUDITREMEMBERTOKEN"{v=$7} END{print v}' /tmp/bludit-remember-only.cookies)"
+    if [[ -n "$TOKEN_AFTER" && "$TOKEN_BEFORE" != "$TOKEN_AFTER" ]]; then
+      record "Authentication and sessions" "remember-me token rotates on use" PASS "Persistent token changed after successful remember-me authentication"
+    elif [[ -n "$TOKEN_AFTER" && "$TOKEN_BEFORE" == "$TOKEN_AFTER" ]]; then
+      record "Authentication and sessions" "remember-me token rotates on use" WARN "Persistent token remained reusable after remember-me authentication; assess replay exposure separately"
+    else
+      record "Authentication and sessions" "remember-me token rotation" WARN "Could not observe the remember-me token after replay (HTTP $CODE)"
+    fi
+  else
+    record "Authentication and sessions" "remember-me token setup" WARN "Remember-me cookie was not issued (HTTP $CODE)"
+  fi
+else
+  record "Authentication and sessions" "remember-me token setup" WARN "Could not extract login CSRF token"
+fi
 
 AUTH=(-H "Authorization: Bearer $API_TOKEN")
 ADMIN_HEADERS=(-H "Authorization: Bearer $API_TOKEN" -H "X-Auth-Token: $ADMIN_AUTH")
