@@ -102,6 +102,16 @@ if [[ "$CODE" != "201" && "$CODE" != "200" ]]; then
 fi
 record "API authorization" "create synthetic private draft" PASS "Created $PAGE_KEY with unique marker"
 
+# Create a future scheduled page to test the second unpublished content state.
+SCHEDULED_MARKER="AUDIT_PRIVATE_SCHEDULED_7f4c91"
+SCHEDULED_BODY="$(jq -n --arg title "$SCHEDULED_MARKER" --arg slug "audit-private-scheduled" --arg content "Private scheduled test body 7f4c91" '{title:$title,slug:$slug,type:"scheduled",date:"2099-01-01 00:00:00",content:$content}')"
+CODE="$(http /tmp/create-scheduled.json -X POST "${AUTH[@]}" "${ADMIN_HEADERS[@]:1}" "${JSON[@]}" -d "$SCHEDULED_BODY" "$BASE/api/pages")"
+if [[ "$CODE" == "201" || "$CODE" == "200" ]]; then
+  record "API authorization" "create synthetic scheduled page" PASS "Created audit-private-scheduled"
+else
+  record "API authorization" "create synthetic scheduled page" WARN "Scheduled page creation returned HTTP $CODE"
+fi
+
 # Unauthenticated access must fail.
 CODE="$(http /tmp/api-no-token.json "$BASE/api/pages?published=false&draft=true")"
 if [[ "$CODE" == "401" ]]; then
@@ -123,6 +133,34 @@ if jq -e --arg marker "$MARKER" '.data.title == $marker' /tmp/api-draft-direct.j
   record "API authorization" "read-only token fetches unpublished draft by key" FINDING "HTTP $CODE direct GET returned $MARKER"
 else
   record "API authorization" "read-only token fetches unpublished draft by key" PASS "HTTP $CODE response did not contain the private draft marker"
+fi
+
+# Scheduled content must also be hidden from a read-only API token.
+CODE="$(http /tmp/api-scheduled-list.json "${AUTH[@]}" "$BASE/api/pages?published=false&scheduled=true")"
+if jq -e --arg marker "$SCHEDULED_MARKER" '.data[]? | select(.title == $marker)' /tmp/api-scheduled-list.json >/dev/null 2>&1; then
+  record "API authorization" "read-only token lists scheduled content" FINDING "HTTP $CODE response contains $SCHEDULED_MARKER"
+else
+  record "API authorization" "read-only token lists scheduled content" PASS "HTTP $CODE response did not contain scheduled marker"
+fi
+CODE="$(http /tmp/api-scheduled-direct.json "${AUTH[@]}" "$BASE/api/pages/audit-private-scheduled")"
+if jq -e --arg marker "$SCHEDULED_MARKER" '.data.title == $marker' /tmp/api-scheduled-direct.json >/dev/null 2>&1; then
+  record "API authorization" "read-only token fetches scheduled page by key" FINDING "HTTP $CODE direct GET returned $SCHEDULED_MARKER"
+else
+  record "API authorization" "read-only token fetches scheduled page by key" PASS "HTTP $CODE response did not contain scheduled marker"
+fi
+
+# Tag/category GET endpoints should not return the unpublished page through their indexes.
+CODE="$(http /tmp/api-private-tag.json "${AUTH[@]}" "$BASE/api/tags/audit-private-tag")"
+if grep -q "$MARKER" /tmp/api-private-tag.json; then
+  record "API authorization" "tag endpoint exposes private draft" FINDING "GET /api/tags/audit-private-tag returned the private draft marker (HTTP $CODE)"
+else
+  record "API authorization" "tag endpoint private draft check" PASS "Tag endpoint did not return the private draft marker (HTTP $CODE)"
+fi
+CODE="$(http /tmp/api-categories.json "${AUTH[@]}" "$BASE/api/categories")"
+if grep -q "$MARKER" /tmp/api-categories.json; then
+  record "API authorization" "category endpoint exposes private draft" FINDING "GET /api/categories returned the private draft marker (HTTP $CODE)"
+else
+  record "API authorization" "category endpoint private draft check" PASS "Category endpoint did not return the private draft marker (HTTP $CODE)"
 fi
 
 # Sensitive API endpoints should require admin authentication in addition to the API token.
