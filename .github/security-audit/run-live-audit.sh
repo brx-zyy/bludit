@@ -48,6 +48,8 @@ s=open(sys.argv[1],encoding="utf-8",errors="ignore").read()
 m=re.search(r'name=["\']tokenCSRF["\'][^>]*value=["\']([^"\']+)',s)
 if not m:
     m=re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']tokenCSRF["\']',s)
+if not m:
+    m=re.search(r'var\\s+tokenCSRF\\s*=\\s*["\\']([^"\\']+)["\\']',s)
 print(m.group(1) if m else "")
 PY
 }
@@ -67,7 +69,7 @@ login_user() {
     --data-urlencode "username=$username" \
     --data-urlencode "password=$password" \
     --data-urlencode "tokenCSRF=$csrf" "$BASE/admin/login")"
-  new_session="$(awk '$6=="PHPSESSID"{v=$7} END{print v}' "$jar")"
+  new_session="$(awk '$6=="BLUDIT-KEY"{v=$7} END{print v}' "$jar")"
   if [[ "$code" == "302" || "$code" == "200" ]]; then
     record "Authentication" "$tag login" PASS "Login POST returned HTTP $code"
     if [[ "$tag" == "admin" ]]; then
