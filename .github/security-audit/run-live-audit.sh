@@ -49,7 +49,7 @@ m=re.search(r'name=["\']tokenCSRF["\'][^>]*value=["\']([^"\']+)',s)
 if not m:
     m=re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']tokenCSRF["\']',s)
 if not m:
-    m=re.search(r'var\\s+tokenCSRF\\s*=\\s*["\\']([^"\\']+)["\\']',s)
+    m=re.search(r"var\s+tokenCSRF\s*=\s*['\"]([^'\"]+)['\"]",s)
 print(m.group(1) if m else "")
 PY
 }
