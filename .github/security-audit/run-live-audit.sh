@@ -94,7 +94,7 @@ ADMIN_HEADERS=(-H "Authorization: Bearer $API_TOKEN" -H "X-Auth-Token: $ADMIN_AU
 JSON=(-H "Content-Type: application/json")
 
 # Create a private draft, owned initially by the admin.
-CREATE_BODY="$(jq -n --arg title "$MARKER" --arg slug "$PAGE_KEY" --arg content "Private test-only draft body 7f4c91" '{title:$title,slug:$slug,type:"draft",content:$content,tags:["audit-private-tag"]}')"
+CREATE_BODY="$(jq -n --arg title "$MARKER" --arg slug "$PAGE_KEY" --arg content "Private test-only draft body 7f4c91" '{title:$title,slug:$slug,type:"draft",content:$content,tags:"audit-private-tag"}')"
 CODE="$(http /tmp/create-draft.json -X POST "${AUTH[@]}" "${ADMIN_HEADERS[@]:1}" "${JSON[@]}" -d "$CREATE_BODY" "$BASE/api/pages")"
 if [[ "$CODE" != "201" && "$CODE" != "200" ]]; then
   record "API authorization" "create synthetic private draft" WARN "POST /api/pages returned HTTP $CODE: $(head -c 220 /tmp/create-draft.json)"
