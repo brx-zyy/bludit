@@ -1,0 +1,74 @@
+name: Bludit deeper API and authorization verification
+on:
+  push:
+    branches:
+      - security-audit/bludit-live-test
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deeper-security-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: gd, mbstring, xml, zip, fileinfo
+          coverage: none
+      - name: Start disposable Bludit instance
+        shell: bash
+        run: |
+          cat > /tmp/router.php <<'PHP'
+          <?php
+          $root = getenv('BLUDIT_ROOT');
+          $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+          if ($path !== '/' && is_file($root . $path)) return false;
+          $_SERVER['DOCUMENT_ROOT'] = $root;
+          $_SERVER['SCRIPT_NAME'] = '/index.php';
+          $_SERVER['PHP_SELF'] = '/index.php';
+          require $root . '/index.php';
+          PHP
+          export BLUDIT_ROOT="$GITHUB_WORKSPACE"
+          php -S 127.0.0.1:8080 -t "$GITHUB_WORKSPACE" /tmp/router.php >/tmp/bludit-server.log 2>&1 &
+          for i in $(seq 1 40); do
+            if curl -sS http://127.0.0.1:8080/install.php >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS 'http://127.0.0.1:8080/install.php?demo=true' >/dev/null
+          test -f bl-content/databases/site.php
+      - name: Patch only the disposable test harness and run deeper checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          p = '.github/security-audit/run-live-audit.sh'
+          s = open(p, encoding='utf-8').read()
+          s = s.replace('audit-owner', 'auditowner').replace('audit-attacker', 'auditattacker')
+          s = s.replace('PHPSESSID', 'BLUDIT-KEY')
+          old = '"' + '$' + '{AUTH[@]}" "' + '$' + '{ADMIN_HEADERS[@]:1}"'
+          new = '"' + '$' + '{ADMIN_HEADERS[@]}"'
+          s = s.replace(old, new)
+          s = s.replace('if [[ "$code" == "302" || "$code" == "200" ]]; then', 'if [[ "$code" == "301" || "$code" == "302" ]]; then')
+          s = s.replace('if [[ "$CODE" == "302" || "$CODE" == "401" ]]; then', 'if [[ "$CODE" == "301" || "$CODE" == "302" || "$CODE" == "401" ]]; then')
+          s = s.replace('tags:"audit-private-tag"', 'tags:"welcome",category:"tutorials"')
+          s = s.replace('audit-private-tag', 'welcome')
+          s = s.replace('"$BASE/api/categories"', '"$BASE/api/categories/tutorials"')
+          s = s.replace('if (!isset($d["audit-private-draft"])) exit(3);\n$d["audit-private-draft"]["username"]="auditowner";', 'if (!isset($d["audit-private-draft"])) exit(3);\n$d["audit-private-draft"]["username"]="auditowner";\nif (isset($d["audit-private-scheduled"])) $d["audit-private-scheduled"]["username"]="auditattacker";')
+          s = s.replace('CODE="$(http /tmp/editor-admin-page.html -b "$OWNER_JAR" "$BASE/admin/edit-content/example-page-1-slug")"', 'EXAMPLE_PAGE_KEY="$(php -r \'$s=file_get_contents("bl-content/databases/pages.php"); $i=strpos($s,"?>"); $d=json_decode(substr($s,$i+2),true); echo array_key_first($d);\')"' + '\nCODE="$(http /tmp/editor-admin-page.html -b "$OWNER_JAR" "$BASE/admin/edit-content/$EXAMPLE_PAGE_KEY")"')
+          s = s.replace('"$BASE/admin/edit-content/example-page-1-slug"', '"$BASE/admin/edit-content/$EXAMPLE_PAGE_KEY"')
+          s = s.replace('curl -sS -b "$ATTACKER_JAR" "$BASE/admin/content" -o /tmp/attacker-content-for-csrf.html', 'curl -sS -b "$ATTACKER_JAR" "$BASE/admin/edit-content/audit-private-scheduled" -o /tmp/attacker-content-for-csrf.html')
+          s = s.replace('curl -sS -b "$ADMIN_JAR" "$BASE/admin/content" -o "$ADMIN_CONTENT_HTML"', 'curl -sS -b "$ADMIN_JAR" "$BASE/admin/edit-content/$EXAMPLE_PAGE_KEY" -o "$ADMIN_CONTENT_HTML"')
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
+          bash .github/security-audit/run-live-audit.sh
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bludit-deeper-security-evidence
+          path: |
+            audit-results.md
+            /tmp/bludit-server.log
+          if-no-files-found: warn
