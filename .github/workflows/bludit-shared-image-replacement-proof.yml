@@ -48,7 +48,10 @@ jobs:
             sleep 1
           done
           test "$READY" = 1
-          curl -fsS "$BASE/install.php?demo=true" >/dev/null
+          curl -sS -L -H 'Accept-Language: en' "$BASE/install.php?demo=true" -o /tmp/install-response.html
+          echo 'Database files after install:'
+          ls -la "$ROOT/bl-content/databases" || true
+          test -f "$ROOT/bl-content/databases/site.php"
           test -f "$ROOT/bl-content/databases/users.php"
           php -r '
           $p=$argv[1]; $s=file_get_contents($p); $i=strpos($s,"?>");
@@ -59,7 +62,7 @@ jobs:
           file_put_contents($p,$prefix.PHP_EOL.json_encode($d,JSON_PRETTY_PRINT));
           ' "$ROOT/bl-content/databases/users.php"
           JAR=/tmp/author-cookie.jar
-          curl -sS -c "$JAR" -b "$JAR" "$BASE/admin/login" -o /tmp/login.html
+          curl -sS -L -H 'Accept-Language: en' -c "$JAR" -b "$JAR" "$BASE/admin/login" -o /tmp/login.html
           CSRF=$(python3 - <<'PY'
           import re
           s=open('/tmp/login.html',encoding='utf-8',errors='ignore').read()
@@ -71,8 +74,9 @@ jobs:
           test -n "$CSRF"
           LOGIN_CODE=$(curl -sS -o /tmp/login-response.html -w '%{http_code}' -c "$JAR" -b "$JAR" --data-urlencode 'username=admin' --data-urlencode 'password=demo123' --data-urlencode "tokenCSRF=$CSRF" "$BASE/admin/login")
           echo "Author login HTTP: $LOGIN_CODE"
+          head -c 300 /tmp/login-response.html || true
           [[ "$LOGIN_CODE" == "301" || "$LOGIN_CODE" == "302" ]]
-          curl -sS -b "$JAR" -c "$JAR" "$BASE/admin/new-content" -o /tmp/author-page.html
+          curl -sS -L -H 'Accept-Language: en' -b "$JAR" -c "$JAR" "$BASE/admin/new-content" -o /tmp/author-page.html
           CSRF=$(python3 - <<'PY'
           import re
           s=open('/tmp/author-page.html',encoding='utf-8',errors='ignore').read()
